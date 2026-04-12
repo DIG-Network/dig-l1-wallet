@@ -1,8 +1,8 @@
 //! Tests for encryption, mnemonic generation, and key derivation.
 
+use dig_l1_wallet::keys::derivation;
 use dig_l1_wallet::keystore::encryption;
 use dig_l1_wallet::keystore::mnemonic;
-use dig_l1_wallet::keys::derivation;
 
 #[test]
 fn test_encrypt_decrypt_secret_key_roundtrip() {

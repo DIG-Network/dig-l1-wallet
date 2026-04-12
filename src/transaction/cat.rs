@@ -37,7 +37,9 @@ use chia::bls::PublicKey;
 use chia::protocol::{Bytes32, Coin, CoinSpend, Program};
 use chia::puzzles::{cat::CatArgs, Memos};
 use chia_query::ChiaQuery;
-use chia_wallet_sdk::driver::{Cat, CatSpend, Puzzle, SpendContext, SpendWithConditions, StandardLayer};
+use chia_wallet_sdk::driver::{
+    Cat, CatSpend, Puzzle, SpendContext, SpendWithConditions, StandardLayer,
+};
 use chia_wallet_sdk::types::Conditions;
 use clvm_utils::{ToTreeHash, TreeHash};
 
@@ -106,9 +108,10 @@ pub async fn resolve_cat_coin(
     })?;
 
     // Parse CAT children from the parent spend
-    let parsed_children = Cat::parse_children(&mut ctx, parent_coin, parent_puzzle, parent_solution)
-        .map_err(|e| WalletError::SpendConstruction(format!("Failed to parse CAT: {:?}", e)))?
-        .ok_or_else(|| WalletError::InvalidCoin("Parent is not a CAT spend".into()))?;
+    let parsed_children =
+        Cat::parse_children(&mut ctx, parent_coin, parent_puzzle, parent_solution)
+            .map_err(|e| WalletError::SpendConstruction(format!("Failed to parse CAT: {:?}", e)))?
+            .ok_or_else(|| WalletError::InvalidCoin("Parent is not a CAT spend".into()))?;
 
     // Find the specific child coin we're looking for
     let proved_cat = parsed_children
@@ -139,7 +142,9 @@ pub fn build_cat_send(
     xch_fee_coins: &[Coin],
 ) -> WalletResult<Vec<CoinSpend>> {
     if cat_coins.is_empty() {
-        return Err(WalletError::SpendConstruction("No CAT coins provided".into()));
+        return Err(WalletError::SpendConstruction(
+            "No CAT coins provided".into(),
+        ));
     }
 
     let total_cat: u64 = cat_coins.iter().map(|c| c.coin.amount).sum();
@@ -179,7 +184,13 @@ pub fn build_cat_send(
 
     // Handle XCH fee coins if needed
     if fee > 0 && !xch_fee_coins.is_empty() {
-        spend_xch_fee(&mut ctx, &p2, xch_fee_coins, fee, cat_coins[0].coin.coin_id())?;
+        spend_xch_fee(
+            &mut ctx,
+            &p2,
+            xch_fee_coins,
+            fee,
+            cat_coins[0].coin.coin_id(),
+        )?;
     }
 
     Ok(ctx.take())
@@ -220,7 +231,13 @@ pub fn build_cat_combine(
 
     // Handle XCH fee
     if fee > 0 && !xch_fee_coins.is_empty() {
-        spend_xch_fee(&mut ctx, &p2, xch_fee_coins, fee, cat_coins[0].coin.coin_id())?;
+        spend_xch_fee(
+            &mut ctx,
+            &p2,
+            xch_fee_coins,
+            fee,
+            cat_coins[0].coin.coin_id(),
+        )?;
     }
 
     Ok(ctx.take())
@@ -266,13 +283,7 @@ pub fn build_cat_split(
 
     // Handle XCH fee
     if fee > 0 && !xch_fee_coins.is_empty() {
-        spend_xch_fee(
-            &mut ctx,
-            &p2,
-            xch_fee_coins,
-            fee,
-            cat_coin.coin.coin_id(),
-        )?;
+        spend_xch_fee(&mut ctx, &p2, xch_fee_coins, fee, cat_coin.coin.coin_id())?;
     }
 
     Ok(ctx.take())

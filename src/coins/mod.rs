@@ -31,10 +31,7 @@ pub async fn get_all_unspent_xch(
     account_index: Option<u32>,
 ) -> WalletResult<Vec<CoinRecord>> {
     let target_accounts: Vec<&WalletAccount> = match account_index {
-        Some(idx) => accounts
-            .iter()
-            .filter(|a| a.index == idx)
-            .collect(),
+        Some(idx) => accounts.iter().filter(|a| a.index == idx).collect(),
         None => accounts.iter().collect(),
     };
 
@@ -57,17 +54,13 @@ pub async fn get_all_unspent_cat(
     _asset_id: &str,
 ) -> WalletResult<Vec<CoinRecord>> {
     let target_accounts: Vec<&WalletAccount> = match account_index {
-        Some(idx) => accounts
-            .iter()
-            .filter(|a| a.index == idx)
-            .collect(),
+        Some(idx) => accounts.iter().filter(|a| a.index == idx).collect(),
         None => accounts.iter().collect(),
     };
 
     let mut all_coins = Vec::new();
     for account in target_accounts {
-        let coins =
-            tracker::get_unspent_cat_coins_by_hint(client, &account.puzzle_hash).await?;
+        let coins = tracker::get_unspent_cat_coins_by_hint(client, &account.puzzle_hash).await?;
         // TODO: Filter by asset_id match when CAT puzzle hash verification is implemented.
         // For now, return all hinted coins — the caller should verify asset_id.
         all_coins.extend(coins);

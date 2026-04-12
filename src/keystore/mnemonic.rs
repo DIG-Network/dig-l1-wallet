@@ -114,6 +114,10 @@ mod tests {
         let mnemonic = generate_mnemonic().unwrap();
         let sk1 = derive_master_key_from_mnemonic(&mnemonic).unwrap();
         let sk2 = derive_master_key_from_mnemonic(&mnemonic).unwrap();
-        assert_eq!(sk1.to_bytes(), sk2.to_bytes(), "Same mnemonic must produce same key");
+        assert_eq!(
+            sk1.to_bytes(),
+            sk2.to_bytes(),
+            "Same mnemonic must produce same key"
+        );
     }
 }

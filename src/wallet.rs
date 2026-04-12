@@ -85,11 +85,7 @@ impl L1Wallet {
 
     /// Create a new wallet with a generated BIP39 mnemonic.
     /// Automatically creates account at derivation index 0.
-    pub async fn create_wallet(
-        &self,
-        name: &str,
-        password: &str,
-    ) -> WalletResult<MnemonicBackup> {
+    pub async fn create_wallet(&self, name: &str, password: &str) -> WalletResult<MnemonicBackup> {
         if self.storage.wallet_exists(name) {
             return Err(WalletError::WalletAlreadyExists(name.to_string()));
         }
@@ -239,8 +235,7 @@ impl L1Wallet {
         let (_, puzzle_hash, address) =
             self.keystore_add_derivation(wallet_name, next_index, prefix)?;
         let master_sk = self.get_master_sk(wallet_name)?;
-        let account_sk: SecretKey =
-            chia::bls::master_to_wallet_unhardened(&master_sk, next_index);
+        let account_sk: SecretKey = chia::bls::master_to_wallet_unhardened(&master_sk, next_index);
         let account_pk = account_sk.public_key();
         let synthetic_pk = account_pk.derive_synthetic();
 
@@ -314,9 +309,13 @@ impl L1Wallet {
         asset_id: &str,
     ) -> WalletResult<Balance> {
         let wallet_file = self.storage.load_wallet(wallet_name)?;
-        let coin_records =
-            coins::get_all_unspent_cat(&self.client, &wallet_file.accounts, account_index, asset_id)
-                .await?;
+        let coin_records = coins::get_all_unspent_cat(
+            &self.client,
+            &wallet_file.accounts,
+            account_index,
+            asset_id,
+        )
+        .await?;
 
         let confirmed: u64 = coin_records.iter().map(|r| r.coin.amount).sum();
         let coin_count = coin_records.len() as u32;
@@ -350,12 +349,9 @@ impl L1Wallet {
         let dest_puzzle_hash = derivation::decode_address(to_address)?;
 
         // Fetch and select coins
-        let coin_records = coins::get_all_unspent_xch(
-            &self.client,
-            &wallet_file.accounts,
-            Some(account_index),
-        )
-        .await?;
+        let coin_records =
+            coins::get_all_unspent_xch(&self.client, &wallet_file.accounts, Some(account_index))
+                .await?;
 
         let sel = selection::select_with_strategy(
             &coin_records,
@@ -380,8 +376,7 @@ impl L1Wallet {
         )?;
 
         let agg_sig_data = transaction::get_agg_sig_data(self.network);
-        let signature =
-            transaction::sign_coin_spends(&coin_spends, &[account_sk], agg_sig_data)?;
+        let signature = transaction::sign_coin_spends(&coin_spends, &[account_sk], agg_sig_data)?;
         let bundle = transaction::assemble_spend_bundle(coin_spends, signature);
 
         self.broadcast_protocol_bundle(&bundle).await
@@ -466,8 +461,7 @@ impl L1Wallet {
         )?;
 
         let agg_sig_data = transaction::get_agg_sig_data(self.network);
-        let signature =
-            transaction::sign_coin_spends(&coin_spends, &[account_sk], agg_sig_data)?;
+        let signature = transaction::sign_coin_spends(&coin_spends, &[account_sk], agg_sig_data)?;
         let bundle = transaction::assemble_spend_bundle(coin_spends, signature);
 
         self.broadcast_protocol_bundle(&bundle).await
@@ -571,12 +565,9 @@ impl L1Wallet {
         let synthetic_pk = account_sk.public_key().derive_synthetic();
         let own_puzzle_hash = Bytes32::from(StandardArgs::curry_tree_hash(synthetic_pk));
 
-        let all_records = coins::get_all_unspent_xch(
-            &self.client,
-            &wallet_file.accounts,
-            Some(account_index),
-        )
-        .await?;
+        let all_records =
+            coins::get_all_unspent_xch(&self.client, &wallet_file.accounts, Some(account_index))
+                .await?;
 
         let records = match coin_ids {
             Some(ids) => filter_by_coin_ids(&all_records, ids)?,
@@ -588,12 +579,15 @@ impl L1Wallet {
             .map(coin_record_to_protocol_coin)
             .collect::<WalletResult<Vec<_>>>()?;
 
-        let coin_spends =
-            transaction::build_combine_tx(synthetic_pk, &protocol_coins, own_puzzle_hash, fee_mojos)?;
+        let coin_spends = transaction::build_combine_tx(
+            synthetic_pk,
+            &protocol_coins,
+            own_puzzle_hash,
+            fee_mojos,
+        )?;
 
         let agg_sig_data = transaction::get_agg_sig_data(self.network);
-        let signature =
-            transaction::sign_coin_spends(&coin_spends, &[account_sk], agg_sig_data)?;
+        let signature = transaction::sign_coin_spends(&coin_spends, &[account_sk], agg_sig_data)?;
         let bundle = transaction::assemble_spend_bundle(coin_spends, signature);
 
         self.broadcast_protocol_bundle(&bundle).await
@@ -673,8 +667,7 @@ impl L1Wallet {
         )?;
 
         let agg_sig_data = transaction::get_agg_sig_data(self.network);
-        let signature =
-            transaction::sign_coin_spends(&coin_spends, &[account_sk], agg_sig_data)?;
+        let signature = transaction::sign_coin_spends(&coin_spends, &[account_sk], agg_sig_data)?;
         let bundle = transaction::assemble_spend_bundle(coin_spends, signature);
 
         self.broadcast_protocol_bundle(&bundle).await
@@ -707,8 +700,7 @@ impl L1Wallet {
         )?;
 
         let agg_sig_data = transaction::get_agg_sig_data(self.network);
-        let signature =
-            transaction::sign_coin_spends(&coin_spends, &[account_sk], agg_sig_data)?;
+        let signature = transaction::sign_coin_spends(&coin_spends, &[account_sk], agg_sig_data)?;
         let bundle = transaction::assemble_spend_bundle(coin_spends, signature);
 
         self.broadcast_protocol_bundle(&bundle).await
@@ -775,8 +767,7 @@ impl L1Wallet {
         )?;
 
         let agg_sig_data = transaction::get_agg_sig_data(self.network);
-        let signature =
-            transaction::sign_coin_spends(&coin_spends, &[account_sk], agg_sig_data)?;
+        let signature = transaction::sign_coin_spends(&coin_spends, &[account_sk], agg_sig_data)?;
         let bundle = transaction::assemble_spend_bundle(coin_spends, signature);
 
         self.broadcast_protocol_bundle(&bundle).await
@@ -898,10 +889,7 @@ fn filter_by_coin_ids(
         match found {
             Some(r) => result.push(r.clone()),
             None => {
-                return Err(WalletError::InvalidCoin(format!(
-                    "Coin not found: {}",
-                    id
-                )));
+                return Err(WalletError::InvalidCoin(format!("Coin not found: {}", id)));
             }
         }
     }

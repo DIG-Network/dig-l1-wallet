@@ -72,13 +72,8 @@ fn test_build_combine_tx() {
         amount: 500_000_000_000,
     };
 
-    let spends = transaction::build_combine_tx(
-        synthetic_pk,
-        &[coin1, coin2],
-        own_ph,
-        50_000_000,
-    )
-    .unwrap();
+    let spends =
+        transaction::build_combine_tx(synthetic_pk, &[coin1, coin2], own_ph, 50_000_000).unwrap();
 
     assert_eq!(spends.len(), 2);
 }
@@ -88,14 +83,7 @@ fn test_build_split_tx() {
     let (account_sk, coin, own_ph) = test_key_and_coin();
     let synthetic_pk = account_sk.public_key().derive_synthetic();
 
-    let spends = transaction::build_split_tx(
-        synthetic_pk,
-        coin,
-        5,
-        own_ph,
-        50_000_000,
-    )
-    .unwrap();
+    let spends = transaction::build_split_tx(synthetic_pk, coin, 5, own_ph, 50_000_000).unwrap();
 
     assert_eq!(spends.len(), 1);
 }
@@ -106,21 +94,18 @@ fn test_sign_coin_spends() {
     let synthetic_pk = account_sk.public_key().derive_synthetic();
     let dest_ph = Bytes32::from([99u8; 32]);
 
-    let spends = transaction::build_xch_send(
-        synthetic_pk,
-        &[coin],
-        dest_ph,
-        500_000_000_000,
-        0,
-        own_ph,
-    )
-    .unwrap();
+    let spends =
+        transaction::build_xch_send(synthetic_pk, &[coin], dest_ph, 500_000_000_000, 0, own_ph)
+            .unwrap();
 
     let agg_sig_data = MAINNET_CONSTANTS.agg_sig_me_additional_data;
     let signature = transaction::sign_coin_spends(&spends, &[account_sk], agg_sig_data).unwrap();
 
     // Signature should not be the default (all zeros)
-    assert_ne!(signature.to_bytes(), chia::bls::Signature::default().to_bytes());
+    assert_ne!(
+        signature.to_bytes(),
+        chia::bls::Signature::default().to_bytes()
+    );
 }
 
 #[test]
@@ -129,15 +114,9 @@ fn test_assemble_spend_bundle() {
     let synthetic_pk = account_sk.public_key().derive_synthetic();
     let dest_ph = Bytes32::from([99u8; 32]);
 
-    let spends = transaction::build_xch_send(
-        synthetic_pk,
-        &[coin],
-        dest_ph,
-        500_000_000_000,
-        0,
-        own_ph,
-    )
-    .unwrap();
+    let spends =
+        transaction::build_xch_send(synthetic_pk, &[coin], dest_ph, 500_000_000_000, 0, own_ph)
+            .unwrap();
 
     let agg_sig_data = MAINNET_CONSTANTS.agg_sig_me_additional_data;
     let signature = transaction::sign_coin_spends(&spends, &[account_sk], agg_sig_data).unwrap();
