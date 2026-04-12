@@ -9,7 +9,7 @@ keywords = ["chia", "wallet", "blockchain", "cat", "l1"]
 categories = ["cryptography::cryptocurrencies"]
 
 [dependencies]
-chia-query = { path = "../chia-query" }
+chia-query = "0.2"
 chia = "0.26"
 chia-wallet-sdk = { version = "0.30", features = ["native-tls"] }
 chia-puzzle-types = "0.26"
