@@ -1,6 +1,6 @@
 [package]
 name = "dig-l1-wallet"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/DIG-Network/dig-l1-wallet"
@@ -17,12 +17,17 @@ chia-puzzles = "0.20"
 clvmr = "0.14"
 clvm-traits = "0.26"
 clvm-utils = "0.26"
+# Encrypted secret-key storage: AES-256-GCM + Argon2id via the shared
+# dig-keystore crate. Replaces the ad-hoc encryption code previously
+# implemented locally in src/keystore/encryption.rs.
+# The `path = ".."` is stripped by `cargo publish`; published consumers
+# always resolve via crates.io.
+dig-keystore = { version = "0.1", path = "../dig-keystore" }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-aes-gcm = "0.10"
-argon2 = "0.5"
+zeroize = "1.7"
 bip39 = "2.0"
 rand = "0.8"
 hex = "0.4"
