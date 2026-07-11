@@ -131,3 +131,56 @@ pub struct CoinSelection {
     /// Number of coins selected.
     pub coin_count: u32,
 }
+
+/// Default maximum number of coins a single spend may consume.
+///
+/// The coin-management selection path
+/// ([`select_for_spend`](crate::coins::selection::select_for_spend)) walks coins
+/// high-value-first and considers at most this many inputs. A wallet whose largest
+/// `DEFAULT_COIN_CAP` coins do not reach the target must first consolidate — see
+/// [`SelectionOutcome::NeedsConsolidation`].
+///
+/// This mirrors the browser/JS spend layer's cap (chip35-dl-coin-wasm `selectCoins`)
+/// so both spend layers agree on the boundary between "spendable" and "needs
+/// consolidation". See SPEC.md §10 "Coin Selection".
+pub const DEFAULT_COIN_CAP: usize = 50;
+
+/// Outcome of a capped, high-value-first coin selection
+/// ([`select_for_spend`](crate::coins::selection::select_for_spend)).
+///
+/// Distinguishes the two success-path cases a caller must handle differently:
+///
+/// - [`SelectionOutcome::Selected`] — coins reaching the target were found within
+///   the coin-count cap; spend them directly.
+/// - [`SelectionOutcome::NeedsConsolidation`] — the wallet holds enough total value,
+///   but reaching the target needs more than `cap` coins. The caller should
+///   consolidate (merge coins into fewer, higher-value coins — see
+///   [`L1Wallet::consolidate_coins`](crate::L1Wallet::consolidate_coins)) and retry.
+///
+/// Genuine insufficient funds (total value below the target) is reported as
+/// [`WalletError::InsufficientFunds`](crate::WalletError::InsufficientFunds), NOT as
+/// a variant here — the caller must be able to tell "too fragmented, consolidate"
+/// apart from "not enough money".
+///
+/// The `NeedsConsolidation` field set mirrors the browser/JS spend layer's
+/// `needsConsolidation` result (chip35-dl-coin-wasm `selectCoins`) so both spend
+/// layers express the same contract. See SPEC.md §10 "Coin Selection".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SelectionOutcome {
+    /// Coins reaching the target were selected within the cap.
+    Selected(CoinSelection),
+    /// Enough total value exists, but the target cannot be reached within `cap`
+    /// coins. The caller should consolidate coins of the asset and retry.
+    NeedsConsolidation {
+        /// Asset label: `"XCH"` for XCH, or the 0x-prefixed CAT tail (asset id) hex.
+        asset: String,
+        /// Total number of unspent coins of the asset the wallet holds.
+        available_coin_count: u32,
+        /// Sum of all unspent coins of the asset in mojos (always `>= required`).
+        available_total: u64,
+        /// The target amount that could not be reached within the cap, in mojos.
+        required: u64,
+        /// The coin-count cap in force for this selection.
+        cap: usize,
+    },
+}

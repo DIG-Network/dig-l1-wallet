@@ -2,11 +2,16 @@
 
 use chia::bls::SecretKey;
 use chia::protocol::{Bytes32, Coin};
-use chia::puzzles::DeriveSynthetic;
+use chia::puzzles::{DeriveSynthetic, LineageProof};
 use chia_puzzle_types::standard::StandardArgs;
+use chia_query::CoinRecord;
+use chia_wallet_sdk::driver::{Cat, CatInfo};
 use chia_wallet_sdk::types::MAINNET_CONSTANTS;
 
+use dig_l1_wallet::coins::selection;
+use dig_l1_wallet::coins::tracker::coin_record_to_protocol_coin;
 use dig_l1_wallet::transaction;
+use dig_l1_wallet::transaction::cat as cat_tx;
 
 fn test_key_and_coin() -> (SecretKey, Coin, Bytes32) {
     let master_sk = SecretKey::from_seed(&[42u8; 32]);
