@@ -42,7 +42,7 @@ pub async fn get_all_unspent_xch(
     }
 
     // Sort by amount descending
-    all_coins.sort_by(|a, b| b.coin.amount.cmp(&a.coin.amount));
+    all_coins.sort_by_key(|c| std::cmp::Reverse(c.coin.amount));
     Ok(all_coins)
 }
 
@@ -66,6 +66,6 @@ pub async fn get_all_unspent_cat(
         all_coins.extend(coins);
     }
 
-    all_coins.sort_by(|a, b| b.coin.amount.cmp(&a.coin.amount));
+    all_coins.sort_by_key(|c| std::cmp::Reverse(c.coin.amount));
     Ok(all_coins)
 }

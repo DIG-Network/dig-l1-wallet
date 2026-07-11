@@ -577,6 +577,48 @@ impl L1Wallet {
         strategy: CoinSelectionStrategy,
     ) -> Result<CoinSelection, WalletError>;
 
+    /// Select XCH coins for a spend, high-value-first and cap-bounded (§10).
+    /// Returns a SelectionOutcome distinguishing Selected / NeedsConsolidation /
+    /// InsufficientFunds. Pass DEFAULT_COIN_CAP for the default cap of 50.
+    pub async fn select_coins_for_spend(
+        &self,
+        wallet_name: &str,
+        account_index: Option<u32>,
+        target_amount: u64,
+        cap: usize,
+    ) -> Result<SelectionOutcome, WalletError>;
+
+    /// Select CAT coins for a spend, high-value-first and cap-bounded (§10).
+    pub async fn select_cat_coins_for_spend(
+        &self,
+        wallet_name: &str,
+        account_index: Option<u32>,
+        asset_id: &str,
+        target_amount: u64,
+        cap: usize,
+    ) -> Result<SelectionOutcome, WalletError>;
+
+    /// Consolidate up to `cap` highest-value XCH coins into one owner coin (§10).
+    /// Resolves a NeedsConsolidation outcome; bounded by cap (unlike combine_coins).
+    /// Wallet must be unlocked. Requires >= 2 unspent coins.
+    pub async fn consolidate_coins(
+        &self,
+        wallet_name: &str,
+        account_index: u32,
+        cap: usize,
+        fee_mojos: u64,
+    ) -> Result<TxResult, WalletError>;
+
+    /// Consolidate up to `cap` highest-value CAT coins of one asset into one coin (§10).
+    pub async fn consolidate_cat_coins(
+        &self,
+        wallet_name: &str,
+        account_index: u32,
+        asset_id: &str,
+        cap: usize,
+        fee_mojos: u64,
+    ) -> Result<TxResult, WalletError>;
+
     /// Combine multiple small XCH coins into a single coin.
     /// If `coin_ids` is None, combines all coins for the account_index.
     /// If `coin_ids` is Some, combines only the specified coins.
@@ -672,14 +714,56 @@ pub enum CoinSelectionStrategy {
     SmallestFirst,
 }
 
-/// Result of a coin selection operation.
+/// Result of a strategy-based coin selection operation.
 pub struct CoinSelection {
     pub coins: Vec<CoinRecord>,  // Selected coins (chia-query type)
     pub total: u64,              // Sum of selected coin amounts
     pub change: u64,             // total - target_amount
     pub coin_count: u32,         // Number of coins selected
 }
+
+/// Default coin-count cap for the capped selection path (select_for_spend).
+pub const DEFAULT_COIN_CAP: usize = 50;
+
+/// Discriminated outcome of the capped, high-value-first selection path
+/// (select_for_spend). Mirrors chip35-dl-coin-wasm v0.14.0 `selectCoins`
+/// field-for-field (see §10). The caller matches the variant — a funding
+/// shortfall is a returned variant, never a thrown error.
+pub enum SelectionOutcome {
+    /// Coins reaching the target were selected within the cap.
+    /// Mirrors JS `{ coins, total, change, coinCount, asset }`.
+    Selected {
+        coins: Vec<CoinRecord>,
+        total: u64,
+        change: u64,
+        coin_count: u32,
+        asset: String,          // "XCH" or the 0x-prefixed CAT tail hex
+    },
+    /// Enough total value exists, but the target needs more than `cap` coins.
+    /// The caller consolidates and retries. Mirrors JS
+    /// `{ availableCoinCount, availableTotal, required, cap }`.
+    NeedsConsolidation {
+        available_coin_count: u32,
+        available_total: u64,   // >= required
+        required: u64,
+        cap: usize,
+    },
+    /// The asset's total value is below the target — genuinely insufficient.
+    /// DISTINCT from NeedsConsolidation. Mirrors JS
+    /// `{ availableCoinCount, availableTotal, required, cap }`.
+    InsufficientFunds {
+        available_coin_count: u32,
+        available_total: u64,   // < required
+        required: u64,
+        cap: usize,
+    },
+}
 ```
+
+`SelectionOutcome::InsufficientFunds` is a distinct type from the crate error
+`WalletError::InsufficientFunds { available, required }`. The strategy-based
+`select_with_strategy` and the spend builders keep returning the latter
+(unchanged); only the new `select_for_spend` path returns `SelectionOutcome`.
 
 ---
 
@@ -897,6 +981,80 @@ select_coins(wallet, account_index, target_amount, strategy):
 ```
 
 **Knapsack** delegates to `chia_wallet_sdk::utils::select_coins` which implements the same algorithm used by DataLayer-Driver. This is the default and recommended strategy.
+
+### Capped High-Value-First Selection (the coin-management path)
+
+`select_for_spend` is the canonical selection path for the coin-management flow. It
+is the native-Rust mirror of the browser/JS spend layer's `selectCoins`
+(chip35-dl-coin-wasm v0.14.0); both layers express ONE contract so a spend behaves
+identically whichever layer builds it. It applies to XCH and to any single CAT tail.
+
+```
+select_for_spend(records, target, asset, cap):     // pure — no network, no signing
+  available_total       = sum(records.amount)
+  available_coin_count  = records.len()
+
+  1. If available_total < target:
+       return InsufficientFunds { available_coin_count, available_total, required=target, cap }
+  2. Sort records by amount DESCENDING, tie-broken by coin id ASCENDING (deterministic).
+  3. eligible = the first `cap` coins; eligible_total = sum(eligible.amount)
+  4. If eligible_total < target:      // enough value in the wallet, but not within the cap
+       return NeedsConsolidation { available_coin_count, available_total, required=target, cap }
+  5. Greedy-accumulate the largest eligible coins until total >= target:
+       return Selected { coins, total, change = total - target, coin_count, asset }
+```
+
+- **High-value-first, capped.** Coins are ordered largest-first and only the largest
+  `cap` (default `DEFAULT_COIN_CAP = 50`) are eligible, minimising the input count of
+  the resulting spend.
+- **Deterministic.** The coin-id tie-break makes the selection independent of the
+  order the chain query returned coins in.
+- **Three distinguishable outcomes** (`SelectionOutcome`, §8): `Selected` (spend it),
+  `NeedsConsolidation` (too fragmented — consolidate then retry), and
+  `InsufficientFunds` (not enough value — consolidation cannot help). These are
+  DISTINCT: `NeedsConsolidation` implies `available_total >= required`;
+  `InsufficientFunds` implies `available_total < required`.
+
+Result semantics mirror chip35-dl-coin-wasm v0.14.0 `selectCoins`: `Selected` ↔
+`{ coins, total, change, coinCount, asset }`; both `NeedsConsolidation` and
+`InsufficientFunds` ↔ `{ availableCoinCount, availableTotal, required, cap }` (in JS
+tagged by an `ok`/`needsConsolidation` discriminant; in Rust by the enum variant).
+
+The strategy-based `select_with_strategy` / `select_coins` / `select_cat_coins`
+(above) and `WalletError::InsufficientFunds` are unchanged — the capped path is
+purely additive and does not replace them.
+
+### Cap-Aware Consolidation
+
+When `select_for_spend` returns `NeedsConsolidation`, the caller merges coins into
+fewer, higher-value coins and retries. `select_for_consolidation` chooses which coins
+to merge; the existing combine builders build the spend.
+
+```
+select_for_consolidation(records, cap) -> Vec<CoinRecord>:   // pure
+  1. Sort records by amount DESCENDING (coin-id tie-break).
+  2. take = min(cap, records.len());  require take >= 2 (else SpendConstruction error).
+  3. Return the top `take` coins.
+```
+
+The highest-value coins are chosen (not the smallest): merging them concentrates the
+most value into one output, so the retried capped spend succeeds in the fewest
+rounds. The selected coins feed the EXISTING combine builders — `build_combine_tx`
+(XCH) or `build_cat_combine` (CAT) — producing an N-inputs → 1-owner-coin self-send;
+no new combine puzzle is introduced.
+
+The `L1Wallet` convenience methods drive the full flow (fetch → select → build →
+sign → broadcast):
+
+```
+consolidate_coins(wallet, account_index, cap, fee) -> TxResult          // XCH
+consolidate_cat_coins(wallet, account_index, asset_id, cap, fee) -> TxResult   // CAT
+```
+
+Unlike `combine_coins` (which merges ALL unspent or a caller-listed set),
+`consolidate_coins` is bounded by `cap`, so the consolidation spend itself always
+fits in a single bundle. For CATs the ring nets to zero, so any network fee rides a
+separate XCH coin (as with `combine_cat_coins`).
 
 ### Combining Coins
 

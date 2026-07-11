@@ -96,7 +96,7 @@ fn select_knapsack(records: &[CoinRecord], target: u64) -> WalletResult<Vec<Coin
 /// Select largest coins first until target is met.
 fn select_largest_first(records: &[CoinRecord], target: u64) -> Vec<CoinRecord> {
     let mut sorted: Vec<CoinRecord> = records.to_vec();
-    sorted.sort_by(|a, b| b.coin.amount.cmp(&a.coin.amount));
+    sorted.sort_by_key(|r| std::cmp::Reverse(r.coin.amount));
 
     let mut selected = Vec::new();
     let mut total = 0u64;
@@ -113,7 +113,7 @@ fn select_largest_first(records: &[CoinRecord], target: u64) -> Vec<CoinRecord> 
 /// Select smallest coins first until target is met.
 fn select_smallest_first(records: &[CoinRecord], target: u64) -> Vec<CoinRecord> {
     let mut sorted: Vec<CoinRecord> = records.to_vec();
-    sorted.sort_by(|a, b| a.coin.amount.cmp(&b.coin.amount));
+    sorted.sort_by_key(|r| r.coin.amount);
 
     let mut selected = Vec::new();
     let mut total = 0u64;
@@ -136,18 +136,22 @@ fn select_smallest_first(records: &[CoinRecord], target: u64) -> Vec<CoinRecord>
 /// eligible for a single spend (pass [`DEFAULT_COIN_CAP`](crate::DEFAULT_COIN_CAP)
 /// for the default of 50).
 ///
-/// Returns:
+/// Returns a discriminated [`SelectionOutcome`] (never a thrown error for a funding
+/// shortfall — the caller matches the variant):
 /// - [`SelectionOutcome::Selected`] when the target is reachable within `cap` coins.
 /// - [`SelectionOutcome::NeedsConsolidation`] when enough total value exists but the
 ///   largest `cap` coins do not sum to the target — the caller should consolidate
 ///   (see [`select_for_consolidation`]) and retry.
-/// - `Err(`[`WalletError::InsufficientFunds`]`)` when the total value is below the
-///   target. This is DISTINCT from `NeedsConsolidation`: consolidation cannot create
-///   value, so "not enough money" is never reported as "needs consolidation".
+/// - [`SelectionOutcome::InsufficientFunds`] when the total value is below the target.
+///   DISTINCT from `NeedsConsolidation`: consolidation cannot create value, so "not
+///   enough money" is never reported as "needs consolidation".
 ///
-/// `asset` only labels the `NeedsConsolidation` result (`"XCH"` or a 0x-prefixed CAT
-/// tail hex); it does not affect which coins are chosen. Selection is pure — no
-/// network, no signing.
+/// `asset` labels the [`SelectionOutcome::Selected`] result (`"XCH"` or a 0x-prefixed
+/// CAT tail hex); it does not affect which coins are chosen. Selection is pure — no
+/// network, no signing. The only `Err` is a malformed coin record (bad hex).
+///
+/// The result shape mirrors chip35-dl-coin-wasm v0.14.0's `selectCoins`
+/// field-for-field — see [`SelectionOutcome`].
 pub fn select_for_spend(
     records: &[CoinRecord],
     target: u64,
@@ -155,12 +159,15 @@ pub fn select_for_spend(
     cap: usize,
 ) -> WalletResult<SelectionOutcome> {
     let available_total: u64 = records.iter().map(|r| r.coin.amount).sum();
+    let available_coin_count = records.len() as u32;
 
     // Genuine insufficient funds: no amount of consolidation can reach the target.
     if available_total < target {
-        return Err(WalletError::InsufficientFunds {
-            available: available_total,
+        return Ok(SelectionOutcome::InsufficientFunds {
+            available_coin_count,
+            available_total,
             required: target,
+            cap,
         });
     }
 
@@ -174,8 +181,7 @@ pub fn select_for_spend(
     // Enough total value exists, but not within the cap → consolidation needed.
     if eligible_total < target {
         return Ok(SelectionOutcome::NeedsConsolidation {
-            asset: asset.to_string(),
-            available_coin_count: records.len() as u32,
+            available_coin_count,
             available_total,
             required: target,
             cap,
@@ -194,12 +200,13 @@ pub fn select_for_spend(
     }
 
     let coin_count = selected.len() as u32;
-    Ok(SelectionOutcome::Selected(CoinSelection {
+    Ok(SelectionOutcome::Selected {
         coins: selected,
         total,
         change: total - target,
         coin_count,
-    }))
+        asset: asset.to_string(),
+    })
 }
 
 /// Select up to `cap` coins to consolidate (merge) into a single coin.
@@ -283,12 +290,19 @@ mod tests {
         let coins = [record(100, 1), record(300, 2), record(200, 3)];
         let outcome = select_for_spend(&coins, 400, "XCH", DEFAULT_COIN_CAP).unwrap();
         match outcome {
-            SelectionOutcome::Selected(sel) => {
+            SelectionOutcome::Selected {
+                coins,
+                total,
+                change,
+                coin_count,
+                asset,
+            } => {
                 // Largest first: 300 then 200 reaches 400; the 100 coin is untouched.
-                assert_eq!(amounts(&sel.coins), vec![300, 200]);
-                assert_eq!(sel.total, 500);
-                assert_eq!(sel.change, 100);
-                assert_eq!(sel.coin_count, 2);
+                assert_eq!(amounts(&coins), vec![300, 200]);
+                assert_eq!(total, 500);
+                assert_eq!(change, 100);
+                assert_eq!(coin_count, 2);
+                assert_eq!(asset, "XCH");
             }
             other => panic!("expected Selected, got {other:?}"),
         }
@@ -299,10 +313,15 @@ mod tests {
         let coins: Vec<CoinRecord> = (0..10).map(|i| record(10, i as u8)).collect();
         let outcome = select_for_spend(&coins, 95, "XCH", DEFAULT_COIN_CAP).unwrap();
         match outcome {
-            SelectionOutcome::Selected(sel) => {
-                assert_eq!(sel.coin_count, 10);
-                assert_eq!(sel.total, 100);
-                assert_eq!(sel.change, 5);
+            SelectionOutcome::Selected {
+                total,
+                change,
+                coin_count,
+                ..
+            } => {
+                assert_eq!(coin_count, 10);
+                assert_eq!(total, 100);
+                assert_eq!(change, 5);
             }
             other => panic!("expected Selected, got {other:?}"),
         }
@@ -314,10 +333,15 @@ mod tests {
         let coins: Vec<CoinRecord> = (0..50).map(|i| record(1, i as u8)).collect();
         let outcome = select_for_spend(&coins, 50, "XCH", 50).unwrap();
         match outcome {
-            SelectionOutcome::Selected(sel) => {
-                assert_eq!(sel.coin_count, 50);
-                assert_eq!(sel.total, 50);
-                assert_eq!(sel.change, 0);
+            SelectionOutcome::Selected {
+                total,
+                change,
+                coin_count,
+                ..
+            } => {
+                assert_eq!(coin_count, 50);
+                assert_eq!(total, 50);
+                assert_eq!(change, 0);
             }
             other => panic!("expected Selected at the cap boundary, got {other:?}"),
         }
@@ -331,13 +355,11 @@ mod tests {
         let outcome = select_for_spend(&coins, 51, "XCH", 50).unwrap();
         match outcome {
             SelectionOutcome::NeedsConsolidation {
-                asset,
                 available_coin_count,
                 available_total,
                 required,
                 cap,
             } => {
-                assert_eq!(asset, "XCH");
                 assert_eq!(available_coin_count, 51);
                 assert_eq!(available_total, 51);
                 assert_eq!(required, 51);
@@ -351,14 +373,18 @@ mod tests {
     fn select_for_spend_insufficient_is_distinct_from_needs_consolidation() {
         // 51 coins of 1 (total 51); target 100 → no consolidation can reach it.
         let coins: Vec<CoinRecord> = (0..51).map(|i| record(1, i as u8)).collect();
-        let err = select_for_spend(&coins, 100, "XCH", 50).unwrap_err();
-        match err {
-            WalletError::InsufficientFunds {
-                available,
+        let outcome = select_for_spend(&coins, 100, "XCH", 50).unwrap();
+        match outcome {
+            SelectionOutcome::InsufficientFunds {
+                available_coin_count,
+                available_total,
                 required,
+                cap,
             } => {
-                assert_eq!(available, 51);
+                assert_eq!(available_coin_count, 51);
+                assert_eq!(available_total, 51);
                 assert_eq!(required, 100);
+                assert_eq!(cap, 50);
             }
             other => panic!("expected InsufficientFunds, got {other:?}"),
         }
@@ -366,24 +392,26 @@ mod tests {
 
     #[test]
     fn select_for_spend_empty_is_insufficient() {
-        let err = select_for_spend(&[], 10, "XCH", 50).unwrap_err();
+        let outcome = select_for_spend(&[], 10, "XCH", 50).unwrap();
         assert!(matches!(
-            err,
-            WalletError::InsufficientFunds {
-                available: 0,
-                required: 10
+            outcome,
+            SelectionOutcome::InsufficientFunds {
+                available_coin_count: 0,
+                available_total: 0,
+                required: 10,
+                cap: 50,
             }
         ));
     }
 
     #[test]
-    fn select_for_spend_labels_cat_asset() {
+    fn select_for_spend_labels_selected_cat_asset() {
         let tail = "0xabc0000000000000000000000000000000000000000000000000000000000000";
-        let coins: Vec<CoinRecord> = (0..51).map(|i| record(1, i as u8)).collect();
-        let outcome = select_for_spend(&coins, 51, tail, 50).unwrap();
+        let coins = [record(100, 1), record(50, 2)];
+        let outcome = select_for_spend(&coins, 120, tail, 50).unwrap();
         match outcome {
-            SelectionOutcome::NeedsConsolidation { asset, .. } => assert_eq!(asset, tail),
-            other => panic!("expected NeedsConsolidation, got {other:?}"),
+            SelectionOutcome::Selected { asset, .. } => assert_eq!(asset, tail),
+            other => panic!("expected Selected, got {other:?}"),
         }
     }
 
@@ -397,14 +425,18 @@ mod tests {
         let a = select_for_spend(&base, 35, "XCH", DEFAULT_COIN_CAP).unwrap();
         let b = select_for_spend(&shuffled, 35, "XCH", DEFAULT_COIN_CAP).unwrap();
 
-        let (SelectionOutcome::Selected(sa), SelectionOutcome::Selected(sb)) = (&a, &b) else {
+        let (
+            SelectionOutcome::Selected { coins: ca, .. },
+            SelectionOutcome::Selected { coins: cb, .. },
+        ) = (&a, &b)
+        else {
             panic!("expected Selected outcomes");
         };
         // 4 coins of 10 reach 35; the SAME 4 coin ids regardless of input order.
-        let ids_a: Vec<&String> = sa.coins.iter().map(|c| &c.coin.parent_coin_info).collect();
-        let ids_b: Vec<&String> = sb.coins.iter().map(|c| &c.coin.parent_coin_info).collect();
+        let ids_a: Vec<&String> = ca.iter().map(|c| &c.coin.parent_coin_info).collect();
+        let ids_b: Vec<&String> = cb.iter().map(|c| &c.coin.parent_coin_info).collect();
         assert_eq!(ids_a, ids_b);
-        assert_eq!(sa.coin_count, 4);
+        assert_eq!(ca.len(), 4);
     }
 
     #[test]
@@ -451,6 +483,60 @@ mod tests {
         let ids_b: Vec<&String> = b.iter().map(|c| &c.coin.parent_coin_info).collect();
         assert_eq!(ids_a, ids_b);
         assert_eq!(a.len(), 4);
+    }
+
+    #[test]
+    fn strategy_largest_first_picks_biggest() {
+        let coins = [record(100, 1), record(300, 2), record(200, 3)];
+        let sel = select_with_strategy(&coins, 400, CoinSelectionStrategy::LargestFirst).unwrap();
+        assert_eq!(amounts(&sel.coins), vec![300, 200]);
+        assert_eq!(sel.total, 500);
+        assert_eq!(sel.change, 100);
+    }
+
+    #[test]
+    fn strategy_smallest_first_picks_dust() {
+        let coins = [record(100, 1), record(300, 2), record(200, 3)];
+        let sel = select_with_strategy(&coins, 250, CoinSelectionStrategy::SmallestFirst).unwrap();
+        // Ascending: 100 then 200 reaches 250.
+        assert_eq!(amounts(&sel.coins), vec![100, 200]);
+        assert_eq!(sel.total, 300);
+        assert_eq!(sel.change, 50);
+    }
+
+    #[test]
+    fn strategy_knapsack_finds_a_covering_set() {
+        let coins = [record(100, 1), record(300, 2), record(200, 3)];
+        let sel = select_with_strategy(&coins, 250, CoinSelectionStrategy::Knapsack).unwrap();
+        assert!(sel.total >= 250);
+        assert_eq!(sel.change, sel.total - 250);
+        assert!(!sel.coins.is_empty());
+    }
+
+    #[test]
+    fn strategy_empty_records_is_insufficient() {
+        let err = select_with_strategy(&[], 10, CoinSelectionStrategy::Knapsack).unwrap_err();
+        assert!(matches!(
+            err,
+            WalletError::InsufficientFunds {
+                available: 0,
+                required: 10
+            }
+        ));
+    }
+
+    #[test]
+    fn strategy_below_target_is_insufficient() {
+        let coins = [record(10, 1), record(20, 2)];
+        let err =
+            select_with_strategy(&coins, 100, CoinSelectionStrategy::LargestFirst).unwrap_err();
+        assert!(matches!(
+            err,
+            WalletError::InsufficientFunds {
+                available: 30,
+                required: 100
+            }
+        ));
     }
 
     #[test]
