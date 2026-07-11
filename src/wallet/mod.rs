@@ -550,6 +550,45 @@ impl L1Wallet {
         selection::select_with_strategy(&records, target_amount, strategy)
     }
 
+    /// Select XCH coins for a spend, high-value-first and bounded by a coin-count
+    /// cap (pass [`DEFAULT_COIN_CAP`] for the default of 50).
+    ///
+    /// Unlike [`select_coins`](Self::select_coins), this returns a
+    /// [`SelectionOutcome`] that distinguishes a wallet that is merely too
+    /// fragmented ([`SelectionOutcome::NeedsConsolidation`] — resolve with
+    /// [`consolidate_coins`](Self::consolidate_coins), then retry) from genuine
+    /// insufficient funds ([`WalletError::InsufficientFunds`]). This is the
+    /// canonical selection path for the coin-management flow.
+    pub async fn select_coins_for_spend(
+        &self,
+        wallet_name: &str,
+        account_index: Option<u32>,
+        target_amount: u64,
+        cap: usize,
+    ) -> WalletResult<SelectionOutcome> {
+        let records = self.get_unspent_coins(wallet_name, account_index).await?;
+        selection::select_for_spend(&records, target_amount, "XCH", cap)
+    }
+
+    /// Select CAT coins for a spend, high-value-first and cap-bounded.
+    ///
+    /// The CAT analogue of [`select_coins_for_spend`](Self::select_coins_for_spend);
+    /// the `NeedsConsolidation` outcome is labelled with `asset_id` and is resolved
+    /// with [`consolidate_cat_coins`](Self::consolidate_cat_coins).
+    pub async fn select_cat_coins_for_spend(
+        &self,
+        wallet_name: &str,
+        account_index: Option<u32>,
+        asset_id: &str,
+        target_amount: u64,
+        cap: usize,
+    ) -> WalletResult<SelectionOutcome> {
+        let records = self
+            .get_unspent_cat_coins(wallet_name, account_index, asset_id)
+            .await?;
+        selection::select_for_spend(&records, target_amount, asset_id, cap)
+    }
+
     /// Combine multiple XCH coins into a single coin.
     pub async fn combine_coins(
         &self,
@@ -638,6 +677,136 @@ impl L1Wallet {
         }
 
         // XCH for fee
+        let mut xch_fee_coins = Vec::new();
+        if fee_mojos > 0 {
+            let xch_records = coins::get_all_unspent_xch(
+                &self.client,
+                &wallet_file.accounts,
+                Some(account_index),
+            )
+            .await?;
+            let xch_sel = selection::select_with_strategy(
+                &xch_records,
+                fee_mojos,
+                CoinSelectionStrategy::Knapsack,
+            )?;
+            xch_fee_coins = xch_sel
+                .coins
+                .iter()
+                .map(coin_record_to_protocol_coin)
+                .collect::<WalletResult<Vec<_>>>()?;
+        }
+
+        let coin_spends = cat_tx::build_cat_combine(
+            synthetic_pk,
+            &resolved_cats,
+            own_puzzle_hash,
+            fee_mojos,
+            &xch_fee_coins,
+        )?;
+
+        let agg_sig_data = transaction::get_agg_sig_data(self.network);
+        let signature = transaction::sign_coin_spends(&coin_spends, &[account_sk], agg_sig_data)?;
+        let bundle = transaction::assemble_spend_bundle(coin_spends, signature);
+
+        self.broadcast_protocol_bundle(&bundle).await
+    }
+
+    /// Consolidate up to `cap` XCH coins into a single coin (self-send).
+    ///
+    /// Resolves a [`SelectionOutcome::NeedsConsolidation`]: it selects the wallet's
+    /// highest-value coins (see
+    /// [`select_for_consolidation`](crate::coins::selection::select_for_consolidation)),
+    /// merges them into one owner coin via the standard combine builder, signs, and
+    /// broadcasts. Merging the largest coins concentrates the most value, so the
+    /// retried capped spend needs the fewest consolidation rounds. Requires at least
+    /// 2 unspent coins. Unlike [`combine_coins`](Self::combine_coins) (which merges
+    /// ALL or a caller-listed set), this is bounded by `cap` so the consolidation
+    /// spend itself always fits in one bundle.
+    pub async fn consolidate_coins(
+        &self,
+        wallet_name: &str,
+        account_index: u32,
+        cap: usize,
+        fee_mojos: u64,
+    ) -> WalletResult<TxResult> {
+        self.assert_unlocked(wallet_name)?;
+        let wallet_file = self.storage.load_wallet(wallet_name)?;
+
+        let account_sk = self.get_account_sk(wallet_name, account_index)?;
+        let synthetic_pk = account_sk.public_key().derive_synthetic();
+        let own_puzzle_hash = Bytes32::from(StandardArgs::curry_tree_hash(synthetic_pk));
+
+        let all_records =
+            coins::get_all_unspent_xch(&self.client, &wallet_file.accounts, Some(account_index))
+                .await?;
+        let records = selection::select_for_consolidation(&all_records, cap)?;
+
+        let protocol_coins: Vec<chia::protocol::Coin> = records
+            .iter()
+            .map(coin_record_to_protocol_coin)
+            .collect::<WalletResult<Vec<_>>>()?;
+
+        let coin_spends = transaction::build_combine_tx(
+            synthetic_pk,
+            &protocol_coins,
+            own_puzzle_hash,
+            fee_mojos,
+        )?;
+
+        let agg_sig_data = transaction::get_agg_sig_data(self.network);
+        let signature = transaction::sign_coin_spends(&coin_spends, &[account_sk], agg_sig_data)?;
+        let bundle = transaction::assemble_spend_bundle(coin_spends, signature);
+
+        self.broadcast_protocol_bundle(&bundle).await
+    }
+
+    /// Consolidate up to `cap` CAT coins of one asset into a single CAT coin.
+    ///
+    /// The CAT analogue of [`consolidate_coins`](Self::consolidate_coins): it selects
+    /// the highest-value CAT coins, merges them via the CAT combine builder (a ring
+    /// that nets to zero, so any network fee rides a separate XCH coin), signs, and
+    /// broadcasts. Requires at least 2 unspent CAT coins of the asset.
+    pub async fn consolidate_cat_coins(
+        &self,
+        wallet_name: &str,
+        account_index: u32,
+        asset_id: &str,
+        cap: usize,
+        fee_mojos: u64,
+    ) -> WalletResult<TxResult> {
+        self.assert_unlocked(wallet_name)?;
+        let wallet_file = self.storage.load_wallet(wallet_name)?;
+
+        let account_sk = self.get_account_sk(wallet_name, account_index)?;
+        let synthetic_pk = account_sk.public_key().derive_synthetic();
+        let own_puzzle_hash = Bytes32::from(StandardArgs::curry_tree_hash(synthetic_pk));
+        let asset_id_bytes = hex_to_bytes32(asset_id)?;
+
+        let all_records = coins::get_all_unspent_cat(
+            &self.client,
+            &wallet_file.accounts,
+            Some(account_index),
+            asset_id,
+        )
+        .await?;
+        let records = selection::select_for_consolidation(&all_records, cap)?;
+
+        let mut resolved_cats = Vec::new();
+        for record in &records {
+            let protocol_coin = coin_record_to_protocol_coin(record)?;
+            let cat = cat_tx::resolve_cat_coin(
+                &self.client,
+                &protocol_coin,
+                &record.coin.parent_coin_info,
+                record.confirmed_block_index,
+                asset_id_bytes,
+            )
+            .await?;
+            resolved_cats.push(cat);
+        }
+
+        // XCH for fee (CAT ring nets to zero — the fee must ride a separate XCH coin).
         let mut xch_fee_coins = Vec::new();
         if fee_mojos > 0 {
             let xch_records = coins::get_all_unspent_xch(

@@ -131,3 +131,88 @@ pub struct CoinSelection {
     /// Number of coins selected.
     pub coin_count: u32,
 }
+
+/// Default maximum number of coins a single spend may consume.
+///
+/// The coin-management selection path
+/// ([`select_for_spend`](crate::coins::selection::select_for_spend)) walks coins
+/// high-value-first and considers at most this many inputs. A wallet whose largest
+/// `DEFAULT_COIN_CAP` coins do not reach the target must first consolidate — see
+/// [`SelectionOutcome::NeedsConsolidation`].
+///
+/// This mirrors the browser/JS spend layer's cap (chip35-dl-coin-wasm `selectCoins`)
+/// so both spend layers agree on the boundary between "spendable" and "needs
+/// consolidation". See SPEC.md §10 "Coin Selection".
+pub const DEFAULT_COIN_CAP: usize = 50;
+
+/// Outcome of a capped, high-value-first coin selection
+/// ([`select_for_spend`](crate::coins::selection::select_for_spend)).
+///
+/// A discriminated result — the caller matches on the variant rather than catching
+/// an error, so the three cases are always distinguishable:
+///
+/// - [`SelectionOutcome::Selected`] — coins reaching the target were found within the
+///   coin-count cap; spend them directly.
+/// - [`SelectionOutcome::NeedsConsolidation`] — the wallet holds enough total value,
+///   but reaching the target needs more than `cap` coins. Consolidate (merge coins
+///   into fewer, higher-value coins — see
+///   [`L1Wallet::consolidate_coins`](crate::L1Wallet::consolidate_coins)) and retry.
+/// - [`SelectionOutcome::InsufficientFunds`] — the total value of the asset is below
+///   the target. DISTINCT from `NeedsConsolidation`: no amount of consolidation can
+///   create value, so "not enough money" is never reported as "too fragmented".
+///
+/// This mirrors the browser/JS spend layer's `selectCoins` result
+/// (chip35-dl-coin-wasm v0.14.0) field-for-field so both spend layers express the
+/// same contract:
+///
+/// | JS result                                              | Rust variant |
+/// |--------------------------------------------------------|--------------|
+/// | `{ coins, total, change, coinCount, asset }`           | `Selected` |
+/// | `{ availableCoinCount, availableTotal, required, cap }`| `NeedsConsolidation` |
+/// | `{ availableCoinCount, availableTotal, required, cap }`| `InsufficientFunds` |
+///
+/// (In JS the three are tagged by an `ok` / `needsConsolidation` discriminant; in
+/// Rust the enum variant is the discriminant.) See SPEC.md §10 "Coin Selection".
+///
+/// Note: this is a distinct type from [`WalletError::InsufficientFunds`], which the
+/// older strategy-based [`select_with_strategy`](crate::coins::selection::select_with_strategy)
+/// and the spend builders still return unchanged (back-compat).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SelectionOutcome {
+    /// Coins reaching the target were selected within the cap.
+    Selected {
+        /// The selected coins, high-value-first (chia-query `CoinRecord` type).
+        coins: Vec<chia_query::CoinRecord>,
+        /// Total amount of all selected coins in mojos.
+        total: u64,
+        /// Excess amount: `total - target`. This becomes the change output.
+        change: u64,
+        /// Number of coins selected.
+        coin_count: u32,
+        /// Asset label: `"XCH"` for XCH, or the 0x-prefixed CAT tail (asset id) hex.
+        asset: String,
+    },
+    /// Enough total value exists, but the target cannot be reached within `cap`
+    /// coins. The caller should consolidate coins of the asset and retry.
+    NeedsConsolidation {
+        /// Total number of unspent coins of the asset the wallet holds.
+        available_coin_count: u32,
+        /// Sum of all unspent coins of the asset in mojos (always `>= required`).
+        available_total: u64,
+        /// The target amount that could not be reached within the cap, in mojos.
+        required: u64,
+        /// The coin-count cap in force for this selection.
+        cap: usize,
+    },
+    /// The asset's total value is below the target — genuinely insufficient funds.
+    InsufficientFunds {
+        /// Total number of unspent coins of the asset the wallet holds.
+        available_coin_count: u32,
+        /// Sum of all unspent coins of the asset in mojos (always `< required`).
+        available_total: u64,
+        /// The target amount, in mojos.
+        required: u64,
+        /// The coin-count cap in force for this selection.
+        cap: usize,
+    },
+}
